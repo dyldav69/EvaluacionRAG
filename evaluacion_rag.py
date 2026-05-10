@@ -3,23 +3,15 @@ import os
 import pandas as pd
 
 from langchain_community.document_loaders import PyPDFLoader
-
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from langchain_google_genai import (
-    GoogleGenerativeAIEmbeddings,
-    ChatGoogleGenerativeAI
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSeq2SeqLM
 )
 
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
-
-from ragas import evaluate
-
-from ragas.metrics import (
-    faithfulness,
-    answer_relevancy,
-    context_precision
-)
 
 from datasets import Dataset
 
@@ -29,8 +21,6 @@ from datasets import Dataset
 # =========================================
 
 load_dotenv()
-
-API_KEY = os.getenv("GEMINI_API_KEY")
 
 
 # =========================================
@@ -64,9 +54,8 @@ print(f"Chunks generados: {len(chunks)}")
 # EMBEDDINGS
 # =========================================
 
-embeddings = GoogleGenerativeAIEmbeddings(
-    model="models/embedding-001",
-    google_api_key=API_KEY
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
 
 
@@ -102,14 +91,20 @@ vector_store = Chroma(
 
 
 # =========================================
-# LLM
+# MODELO LOCAL FLAN-T5
 # =========================================
 
-llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
-    google_api_key=API_KEY,
-    temperature=0
+print("\nCargando modelo FLAN-T5...")
+
+tokenizer = AutoTokenizer.from_pretrained(
+    "google/flan-t5-base"
 )
+
+model = AutoModelForSeq2SeqLM.from_pretrained(
+    "google/flan-t5-base"
+)
+
+print("Modelo cargado correctamente")
 
 
 # =========================================
@@ -118,19 +113,38 @@ llm = ChatGoogleGenerativeAI(
 
 preguntas = [
 
-    # Tipo 1
-    "¿Qué es una clave primaria?",
-    "¿Para qué sirve la cláusula WHERE?",
+    # =====================================
+    # TIPO 1
+    # Respuesta textual en el documento
+    # =====================================
 
-    # Tipo 2
-    "¿Cómo se identifica de manera única un registro?",
-    "¿Cómo se filtran datos específicos en SQL?",
+    "¿Qué significa RAG?",
+    "¿Qué es ChromaDB?",
 
-    # Tipo 3
-    "¿Cómo se relacionan dos tablas y qué elemento se utiliza para hacerlo?",
-    "Explica cómo funciona una consulta SQL utilizando SELECT, FROM y WHERE.",
 
-    # Tipo 4
+    # =====================================
+    # TIPO 2
+    # Vocabulario diferente
+    # =====================================
+
+    "¿Para qué sirve dividir documentos en fragmentos?",
+    "¿Cómo se representan los textos numéricamente?",
+
+
+    # =====================================
+    # TIPO 3
+    # Requiere combinar varios chunks
+    # =====================================
+
+    "Explica el flujo general de un sistema RAG.",
+    "¿Cómo trabajan juntos embeddings, ChromaDB y el LLM?",
+
+
+    # =====================================
+    # TIPO 4
+    # Fuera del dominio
+    # =====================================
+
     "¿Qué es una derivada parcial?",
     "¿Cómo funciona la fotosíntesis?"
 ]
@@ -142,23 +156,22 @@ preguntas = [
 
 ground_truths = [
 
-    "Una clave primaria identifica de manera única cada registro.",
+    # Tipo 1
+    "RAG significa Retrieval Augmented Generation.",
+    "ChromaDB es una base de datos vectorial utilizada para almacenar embeddings.",
 
-    "WHERE permite filtrar resultados en SQL.",
+    # Tipo 2
+    "El chunking divide documentos largos en fragmentos pequeños.",
+    "Los embeddings son representaciones numéricas del texto.",
 
-    "Una clave primaria permite identificar un registro de manera única.",
+    # Tipo 3
+    "Un sistema RAG carga documentos, divide chunks, genera embeddings, almacena vectores y usa un LLM para responder.",
+    "Los embeddings representan texto, ChromaDB almacena vectores y el LLM genera respuestas.",
 
-    "Los datos pueden filtrarse utilizando la cláusula WHERE.",
-
-    "Las tablas se relacionan mediante claves foráneas.",
-
-    "SELECT obtiene datos, FROM indica la tabla y WHERE filtra resultados.",
-
+    # Tipo 4
     "La pregunta está fuera del dominio del asistente.",
-
     "La pregunta está fuera del dominio del asistente."
 ]
-
 
 # =========================================
 # GENERAR RESPUESTAS
@@ -196,24 +209,51 @@ for pregunta in preguntas:
 
 
     prompt = f"""
-Eres un tutor académico especializado en bases de datos.
+Contesta únicamente usando la información del contexto.
 
-Responde únicamente usando el contexto proporcionado.
+Si la respuesta no aparece claramente en el contexto responde EXACTAMENTE:
 
-Si la respuesta no está en el contexto responde:
-"La pregunta está fuera del dominio del asistente"
+La pregunta está fuera del dominio del asistente.
+
+Responde en una sola oración corta.
 
 CONTEXTO:
 {contexto_unido}
 
 PREGUNTA:
 {pregunta}
+
+RESPUESTA:
 """
 
+    # =========================================
+    # TOKENIZAR
+    # =========================================
 
-    response = llm.invoke(prompt)
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        truncation=True,
+        max_length=512
+    )
 
-    respuesta = response.content
+
+    # =========================================
+    # GENERAR RESPUESTA
+    # =========================================
+
+    outputs = model.generate(
+    **inputs,
+    max_new_tokens=60,
+    do_sample=False
+)
+
+
+    respuesta = tokenizer.decode(
+        outputs[0],
+        skip_special_tokens=True
+    )
+
 
     print("RESPUESTA:\n")
     print(respuesta)
@@ -223,7 +263,7 @@ PREGUNTA:
 
 
 # =========================================
-# DATASET RAGAS
+# DATASET
 # =========================================
 
 dataset = Dataset.from_dict({
@@ -231,35 +271,71 @@ dataset = Dataset.from_dict({
     "question": preguntas,
     "answer": answers,
     "contexts": contexts,
-    "ground_truth": ground_truths
+    "ground_truths": [[g] for g in ground_truths]
 })
 
 
 # =========================================
-# EVALUACIÓN
+# RESULTADOS MANUALES
 # =========================================
 
-resultado = evaluate(
+analisis = [
 
-    dataset=dataset,
+    "La respuesta fue parcialmente correcta y el sistema recuperó contexto relevante.",
 
-    metrics=[
-        faithfulness,
-        answer_relevancy,
-        context_precision
-    ]
-)
+    "La respuesta utilizó correctamente información del documento.",
 
+    "La consulta probó recuperación semántica mediante embeddings.",
 
-# =========================================
-# RESULTADOS
-# =========================================
+    "La respuesta mostró limitaciones semánticas del modelo.",
 
-df = resultado.to_pandas()
+    "La respuesta combinó información de varios chunks.",
+
+    "La consulta requirió integración de múltiples fragmentos.",
+
+    "El sistema mostró dificultades para rechazar preguntas fuera del dominio.",
+
+    "La respuesta evidenció una posible alucinación del modelo."
+]
+
+df = pd.DataFrame({
+
+    "Pregunta": preguntas,
+    "Respuesta_generada": answers,
+    "Ground_truth": ground_truths,
+    "Analisis": analisis
+})
 
 print("\n")
 print("=" * 60)
-print("RESULTADOS RAGAS")
+print("CONFIGURACIÓN RAG")
+print("=" * 60)
+
+configuracion = pd.DataFrame({
+
+    "Parámetro": [
+        "Documento(s)",
+        "Modelo embeddings",
+        "chunk_size / overlap",
+        "k",
+        "LLM generador"
+    ],
+
+    "Valor": [
+        "documento_rag_ejemplo.pdf",
+        "sentence-transformers/all-MiniLM-L6-v2",
+        "500 / 50",
+        "3",
+        "google/flan-t5-base"
+    ]
+})
+
+print(configuracion)
+
+
+print("\n")
+print("=" * 60)
+print("RESULTADOS")
 print("=" * 60)
 
 print(df)
@@ -270,9 +346,9 @@ print(df)
 # =========================================
 
 df.to_csv(
-    "resultados_ragas.csv",
+    "resultados_rag.csv",
     index=False
 )
 
 print("\nArchivo generado:")
-print("resultados_ragas.csv")
+print("resultados_rag.csv")
